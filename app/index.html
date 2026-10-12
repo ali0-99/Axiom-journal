@@ -860,6 +860,38 @@ const DAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Satur
 
 function $(id){ return document.getElementById(id); }
 
+/* ══════════════════ SERVER WAKE-UP RETRY ══════════════════
+   The free Render server sleeps when idle; the first request after that can take 30-60 s
+   (or fail with a network / 502-504 error). Instead of a red error we show a friendly
+   message and keep trying for up to ~75 s. Used only for login-type requests. */
+async function fetchWithWakeRetry(url, options, msgElId, msg){
+  const MAX_WAIT_MS = 75000, GAP_MS = 4000, SLOW_MS = 3500;
+  const text = msg || "Waking up the server… it sleeps when idle, so this can take up to a minute. Please wait.";
+  const started = Date.now();
+  let shown = false;
+  const show = ()=>{
+    const el = msgElId ? document.getElementById(msgElId) : null;
+    if(el){ el.textContent = text; shown = true; }
+  };
+  const slowTimer = setTimeout(show, SLOW_MS);   /* request is just hanging while the server wakes up */
+  try {
+    for(;;){
+      try {
+        const res = await fetch(url, options);
+        if(res.status !== 502 && res.status !== 503 && res.status !== 504) return res;
+        if(Date.now() - started >= MAX_WAIT_MS) return res;
+      } catch(e){
+        if(navigator.onLine === false || Date.now() - started >= MAX_WAIT_MS) throw e;
+      }
+      show();
+      await new Promise(r => setTimeout(r, GAP_MS));
+    }
+  } finally {
+    clearTimeout(slowTimer);
+    if(shown){ const el = document.getElementById(msgElId); if(el) el.textContent = ""; }
+  }
+}
+
 /* ══ THEME (dark / light) ══ */
 function cssVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 function currentTheme(){ return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light"; }
@@ -924,17 +956,18 @@ $("authSubmit").addEventListener("click", async ()=>{
 
   const endpoint = authMode === "signup" ? "/auth/signup" : "/auth/login";
   const originalLabel = btn.textContent;
+  if(originalLabel === "PLEASE WAIT...") return;   /* a request is already running */
   btn.textContent = "PLEASE WAIT...";
   err.textContent = "";
 
   try {
     const payload = { username: user, password: pass };
     if(authMode === "signup") payload.email = email;
-    const res = await fetch(API_BASE + endpoint, {
+    const res = await fetchWithWakeRetry(API_BASE + endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-    });
+    }, "authInfo");
     const body = await res.json();
     if(!res.ok){
       err.textContent = body.error || "Something went wrong. Please try again.";
@@ -946,7 +979,7 @@ $("authSubmit").addEventListener("click", async ()=>{
     }
     loginAs(body.user.username, body.token);
   } catch(netErr){
-    err.textContent = "Could not reach the server. Is the backend running?";
+    err.textContent = "Could not reach the server. Please check your internet connection and try again in a minute.";
     btn.textContent = originalLabel;
   }
 });
@@ -1011,11 +1044,11 @@ $("forgotSubmit").addEventListener("click", async ()=>{
   const label = btn.textContent;
   btn.textContent = "PLEASE WAIT..."; btn.disabled = true;
   try {
-    const res = await fetch(API_BASE + "/auth/forgot-password", {
+    const res = await fetchWithWakeRetry(API_BASE + "/auth/forgot-password", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
-    });
+    }, "forgotSuccess");
     const body = await res.json().catch(()=> ({}));
     if(!res.ok){ err.textContent = body.error || "Something went wrong. Please try again."; }
     else { ok.textContent = body.message || "If an account with that email exists, we've sent a reset link. Check your inbox and spam folder."; }
@@ -1043,11 +1076,11 @@ $("resetSubmit").addEventListener("click", async ()=>{
   const label = btn.textContent;
   btn.textContent = "PLEASE WAIT..."; btn.disabled = true;
   try {
-    const res = await fetch(API_BASE + "/auth/reset-password", {
+    const res = await fetchWithWakeRetry(API_BASE + "/auth/reset-password", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token: pendingResetToken, password: p1 }),
-    });
+    }, "resetError");
     const body = await res.json().catch(()=> ({}));
     if(!res.ok){
       err.textContent = body.error || "Something went wrong. Please try again.";
@@ -1074,11 +1107,11 @@ async function handleGoogleCredential(response){
   const err = $("authError");
   err.textContent = "";
   try {
-    const res = await fetch(API_BASE + "/auth/google", {
+    const res = await fetchWithWakeRetry(API_BASE + "/auth/google", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ credential: response.credential }),
-    });
+    }, "authInfo");
     const data = await res.json();
     if(!res.ok){
       err.textContent = data.error || "Google sign-in failed.";
@@ -1086,7 +1119,7 @@ async function handleGoogleCredential(response){
     }
     loginAs(data.user.username, data.token);
   } catch(e){
-    err.textContent = "Could not reach the server. Is the backend running?";
+    err.textContent = "Could not reach the server. Please check your internet connection and try again in a minute.";
   }
 }
 
@@ -1135,11 +1168,11 @@ $("facebookSignInBtn").addEventListener("click", ()=>{
 async function handleFacebookToken(accessToken){
   const err = $("authError");
   try {
-    const res = await fetch(API_BASE + "/auth/facebook", {
+    const res = await fetchWithWakeRetry(API_BASE + "/auth/facebook", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ accessToken }),
-    });
+    }, "authInfo");
     const data = await res.json();
     if(!res.ok){
       err.textContent = data.error || "Facebook sign-in failed.";
@@ -2350,17 +2383,23 @@ $("startCheckoutBtn").addEventListener("click", ()=>{
   if(!token || !username) return;
   authToken = token;
   try {
-    const res = await fetch(API_BASE + "/accounts", { headers: { "Authorization": "Bearer " + token } });
+    const res = await fetchWithWakeRetry(API_BASE + "/accounts", { headers: { "Authorization": "Bearer " + token } }, "authInfo", "Signing you in… the server is waking up, this can take up to a minute.");
+    if(currentUser) return;   /* user already logged in by hand while we waited */
     if(res.ok){
       try { prefetchedAccounts = { token: token, data: await res.json() }; } catch(e){ prefetchedAccounts = null; }
       loginAs(username, token);
     } else {
-      localStorage.removeItem("axiom_token");
-      localStorage.removeItem("axiom_username");
+      if(res.status === 401 || res.status === 403){   /* only a rejected token logs the user out, not a server hiccup */
+        localStorage.removeItem("axiom_token");
+        localStorage.removeItem("axiom_username");
+      } else {
+        $("authError").textContent = "The server is not responding right now. Please try again in a minute.";
+      }
       authToken = null;
     }
   } catch(e){
     authToken = null;
+    if(!currentUser) $("authError").textContent = "Could not reach the server. Please check your internet connection and try again.";
   }
 })();
 </script>
