@@ -26,8 +26,7 @@ A free web-based trading journal for Forex and financial traders. Log trades, au
 Axiom Trading Journal is built and maintained by Ali Raza under the Trading and Technology divisions of Axiom Cooperation.
 
 Learn more about Axiom Cooperation:
-
-https://ali0-99.github.io/axiom-cooperation/
+https://razascalesoffical.github.io/axiom-cooperation/
 
 ## License
 
